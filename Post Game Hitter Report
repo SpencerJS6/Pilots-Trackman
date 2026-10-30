@@ -518,7 +518,7 @@ def draw_strike_zone_ab(ax, pa_df):
                 px,
                 pz,
                 marker=marker,
-                s=160,
+                s=200,
                 color=get_color(pt),
                 edgecolors="white",
                 linewidths=0.8,
@@ -529,7 +529,7 @@ def draw_strike_zone_ab(ax, pa_df):
                 px + 0.06,
                 pz + 0.06,
                 str(i),
-                fontsize=10,
+                fontsize=11,
                 fontweight="bold",
                 color=UP_PURPLE,
                 bbox=dict(
@@ -582,30 +582,32 @@ def draw_at_bat_legends(fig, page_items):
         Line2D(
             [0], [0], marker="o", linestyle="none",
             markerfacecolor=get_color(pitch_type), markeredgecolor="white",
-            markersize=8, label=pitch_type,
+            markersize=11, label=pitch_type,
         )
         for pitch_type in pitch_types
     ]
     handles.extend([
         Line2D(
             [0], [0], marker="o", linestyle="none", color=UP_PURPLE,
-            markersize=8, label="Swing",
+            markerfacecolor="none", markeredgecolor=UP_PURPLE,
+            markeredgewidth=1.8, markersize=13, label="Swing",
         ),
         Line2D(
             [0], [0], marker="s", linestyle="none", color=UP_GRAY,
-            markersize=8, label="Taken",
+            markerfacecolor="none", markeredgecolor=UP_GRAY,
+            markeredgewidth=1.8, markersize=13, label="Taken",
         ),
     ])
     fig.legend(
         handles=handles,
         labels=[handle.get_label() for handle in handles],
         loc="upper center", bbox_to_anchor=(0.5, 0.78),
-        ncol=min(8, len(handles)), frameon=False, fontsize=9,
-        title="Pitch type / decision",
+        ncol=min(8, len(handles)), frameon=False, fontsize=15,
+        title="Pitch type / decision", title_fontsize=15,
     )
 
 def draw_summary_strike_zone(
-    ax, pitch_rows, title, total_count, decision_area=None, decision_score=None
+    ax, pitch_rows, title, total_count, decision_area=None
 ):
     ax.set_facecolor(UP_LIGHT)
     ax.add_patch(patches.Rectangle(
@@ -651,7 +653,7 @@ def draw_summary_strike_zone(
                 ax.scatter(
                     pitch_type_rows["PlateLocSide_num"],
                     pitch_type_rows["PlateLocHeight_num"],
-                    s=85, marker=marker, color=get_color(pitch_type),
+                    s=120, marker=marker, color=get_color(pitch_type),
                     edgecolors="white",
                     linewidths=0.8, label=f"{pitch_type} {decision}", zorder=3
                 )
@@ -665,7 +667,7 @@ def draw_summary_strike_zone(
             ax.scatter(
                 pitch_type_rows["PlateLocSide_num"],
                 pitch_type_rows["PlateLocHeight_num"],
-                s=85, color=get_color(pitch_type), edgecolors="white",
+                s=120, color=get_color(pitch_type), edgecolors="white",
                 linewidths=0.8, label=pitch_type, zorder=3
             )
     elif decision_area:
@@ -681,20 +683,15 @@ def draw_summary_strike_zone(
             color=UP_PURPLE, fontsize=11, fontweight="bold"
         )
 
-    if decision_area and decision_score is not None:
-        ax.set_title(
-            f"{title}\nScore: {decision_score:+d}",
-            color=UP_PURPLE, fontweight="bold", fontsize=10, pad=3
-        )
-    elif decision_area:
+    if decision_area:
         ax.set_title(
             f"{title} ({len(pitch_rows)} decisions)",
-            color=UP_PURPLE, fontweight="bold", fontsize=10, pad=3
+            color=UP_PURPLE, fontweight="bold", fontsize=14, pad=6
         )
     else:
         ax.set_title(
             f"{title} ({len(pitch_rows)} of {total_count} located)",
-            color=UP_PURPLE, fontweight="bold", fontsize=10, pad=3
+            color=UP_PURPLE, fontweight="bold", fontsize=14, pad=6
         )
     ax.set_xlim(-2.4, 2.4)
     ax.set_ylim(0, 5)
@@ -759,11 +756,11 @@ def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
     chase_rate = format_rate(int(is_chase.sum()), int(chase_eligible.sum()))
     whiff_rate = format_rate(int(is_whiff.sum()), int(is_swing.sum()))
 
-    fig = plt.figure(figsize=(17, 15), facecolor="white")
+    fig = plt.figure(figsize=(19, 17), facecolor="white")
     draw_page_header(fig, display_name, page_num)
     fig.text(
         0.5, 0.89, "Pitch Location Summary",
-        ha="center", va="center", fontsize=18,
+        ha="center", va="center", fontsize=20,
         fontweight="bold", color=UP_PURPLE
     )
 
@@ -798,9 +795,6 @@ def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
     edge = has_location & edge_outer & ~edge_inner
     swing_decision = pd.Series(np.where(is_swing, "Swing", "Taken"), index=hitter_df.index)
     decision_known = is_swing | is_taken
-    heart_decision_score = int(is_swing.loc[heart & decision_known].sum()) - int(
-        is_taken.loc[heart & decision_known].sum()
-    )
     strikes_col = cols.get("strikes")
     if strikes_col and strikes_col in hitter_df.columns:
         strikes_before_pitch = pd.to_numeric(hitter_df[strikes_col], errors="coerce")
@@ -811,32 +805,27 @@ def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
     else:
         edge_before_two_strikes = pd.Series(False, index=hitter_df.index)
         edge_with_two_strikes = pd.Series(False, index=hitter_df.index)
-    edge_decision_score = int(is_taken.loc[edge_before_two_strikes].sum()) - int(
-        is_swing.loc[edge_before_two_strikes].sum()
-    )
     decision_categories = [
-        ("Dick Shot Decisions", heart, heart_decision_score, "heart"),
+        ("Dick Shot Decisions", heart, "heart"),
         (
             "Edge Decisions Before 2 Strikes",
             edge_before_two_strikes,
-            edge_decision_score,
             "edge",
         ),
         (
             "Edge Decisions At 2 Strikes",
             edge_with_two_strikes,
-            None,
             "edge",
         ),
     ]
     axes = [
-        fig.add_axes([0.03, 0.50, 0.22, 0.28]),
-        fig.add_axes([0.27, 0.50, 0.22, 0.28]),
-        fig.add_axes([0.51, 0.50, 0.22, 0.28]),
-        fig.add_axes([0.75, 0.50, 0.22, 0.28]),
-        fig.add_axes([0.14, 0.14, 0.22, 0.28]),
-        fig.add_axes([0.39, 0.14, 0.22, 0.28]),
-        fig.add_axes([0.64, 0.14, 0.22, 0.28]),
+        fig.add_axes([0.02, 0.47, 0.23, 0.27]),
+        fig.add_axes([0.265, 0.47, 0.23, 0.27]),
+        fig.add_axes([0.51, 0.47, 0.23, 0.27]),
+        fig.add_axes([0.755, 0.47, 0.23, 0.27]),
+        fig.add_axes([0.13, 0.12, 0.23, 0.27]),
+        fig.add_axes([0.385, 0.12, 0.23, 0.27]),
+        fig.add_axes([0.64, 0.12, 0.23, 0.27]),
     ]
     category_axes = (axes[0], axes[2], axes[3], axes[4])
     for ax, (title, category_mask) in zip(category_axes, categories):
@@ -847,7 +836,7 @@ def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
         )
 
     decision_axes = (axes[1], axes[5], axes[6])
-    for ax, (title, area_mask, decision_score, decision_area) in zip(
+    for ax, (title, area_mask, decision_area) in zip(
         decision_axes, decision_categories
     ):
         decision_mask = area_mask & decision_known
@@ -856,7 +845,6 @@ def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
         draw_summary_strike_zone(
             ax, decision_rows, title, int(decision_mask.sum()),
             decision_area=decision_area,
-            decision_score=decision_score
         )
 
     pitch_types = sorted(
@@ -867,26 +855,28 @@ def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
         Line2D(
             [0], [0], marker="o", linestyle="none",
             markerfacecolor=get_color(pitch_type), markeredgecolor="white",
-            markersize=8, label=pitch_type,
+            markersize=11, label=pitch_type,
         )
         for pitch_type in pitch_types
     ]
     legend_handles.extend([
         Line2D(
             [0], [0], marker="o", linestyle="none", color="#222222",
-            markersize=8, label="Swing",
+            markerfacecolor="none", markeredgecolor="#222222",
+            markeredgewidth=1.8, markersize=13, label="Swing",
         ),
         Line2D(
             [0], [0], marker="s", linestyle="none", color="#222222",
-            markersize=8, label="Taken",
+            markerfacecolor="none", markeredgecolor="#222222",
+            markeredgewidth=1.8, markersize=13, label="Taken",
         ),
     ])
     fig.legend(
         handles=legend_handles,
         labels=[handle.get_label() for handle in legend_handles],
         loc="upper center", bbox_to_anchor=(0.5, 0.85),
-        ncol=min(8, len(legend_handles)), frameon=False, fontsize=9,
-        title="Pitch type / decision"
+        ncol=min(8, len(legend_handles)), frameon=False, fontsize=15,
+        title="Pitch type / decision", title_fontsize=15
     )
 
     metric_text = (
@@ -897,7 +887,7 @@ def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
     )
     fig.text(
         0.5, 0.045, metric_text,
-        ha="center", va="center", fontsize=13, color=UP_PURPLE
+        ha="center", va="center", fontsize=15, color=UP_PURPLE
     )
     pdf.savefig(fig, facecolor=fig.get_facecolor())
     plt.close(fig)
@@ -956,16 +946,6 @@ def draw_contact_point(ax, pa_df, cols):
         zorder=1
     )
 
-    # Subtle center line from back point toward mound
-    ax.plot(
-        [0, 0],
-        [0, 4.0],
-        color=UP_PURPLE,
-        lw=1.0,
-        alpha=0.35,
-        zorder=0
-    )
-
     valid_points = 0
 
     for i, (_, row) in enumerate(pa_df.iterrows(), start=1):
@@ -992,7 +972,7 @@ def draw_contact_point(ax, pa_df, cols):
             ax.scatter(
                 plot_x,
                 plot_y,
-                s=160,
+                s=200,
                 color=color,
                 edgecolors="white",
                 linewidths=0.8,
@@ -1003,7 +983,7 @@ def draw_contact_point(ax, pa_df, cols):
                 plot_x + 0.05,
                 plot_y + 0.05,
                 str(i),
-                fontsize=10,
+                fontsize=11,
                 fontweight="bold",
                 color=UP_PURPLE,
                 bbox=dict(
@@ -1080,11 +1060,11 @@ def draw_pitch_table(ax, pa_df, cols):
     tbl.auto_set_font_size(False)
 
     if len(rows) <= 5:
-        body_size, head_size = 15, 16
+        body_size, head_size = 17, 18
     elif len(rows) <= 7:
-        body_size, head_size = 14, 15
+        body_size, head_size = 16, 17
     else:
-        body_size, head_size = 13, 14
+        body_size, head_size = 14, 15
 
     tbl.set_fontsize(body_size)
 
@@ -1131,7 +1111,7 @@ def draw_info_box(ax, pa_df, cols, ab_number):
         "\n".join(fixed_lines),
         transform=ax.transAxes,
         ha="left", va="top",
-        fontsize=12.5,
+        fontsize=14,
         color=UP_PURPLE,
         fontweight="bold",
         clip_on=True,
@@ -1142,7 +1122,7 @@ def draw_info_box(ax, pa_df, cols, ab_number):
         outcome,
         transform=ax.transAxes,
         ha="left", va="top",
-        fontsize=11.5,
+        fontsize=13,
         color=UP_PURPLE,
         fontweight="bold",
         clip_on=True,
@@ -1510,7 +1490,7 @@ for team_name in sorted(teams):
                     else:
                         row_heights.append(1.0)
 
-                fig = plt.figure(figsize=(17, 14.5), facecolor="white")
+                fig = plt.figure(figsize=(19.5, 18.5), facecolor="white")
 
                 # Always show hitter name in page header
                 draw_page_header(fig, display_name, page_num)
@@ -1519,7 +1499,7 @@ for team_name in sorted(teams):
                 gs = gridspec.GridSpec(
     len(page_items), 5,
     figure=fig,
-    width_ratios=[1.05, 1.05, 1.15, 0.85, 1.05],
+    width_ratios=[1.05, 1.05, 1.15, 1.0, 1.05],
     height_ratios=row_heights,
     left=0.01,
     right=0.99,
