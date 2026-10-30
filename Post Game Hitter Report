@@ -1,0 +1,1578 @@
+import os
+import re
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import matplotlib.gridspec as gridspec
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import Normalize
+from matplotlib.lines import Line2D
+from matplotlib.path import Path
+
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+def get_csv_path():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        path = filedialog.askopenfilename(
+            title="",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        root.destroy()
+        if path and path.strip():
+            return path
+    except Exception:
+        # If GUI isn't available or tkinter fails, fall back to console input
+        pass
+
+    path = input("Enter path to CSV file (or press Enter to cancel): ").strip()
+    if not path:
+        raise SystemExit("No CSV path provided.")
+    return path
+
+
+CSV_PATH = r"C:\Users\sjsco\OneDrive\Desktop\Pilots Offense\20260712-HamlinSC-1.csv"
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hitter_reports")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+ABS_PER_PAGE = 4
+
+UP_PURPLE = "#2B0D48"
+UP_LIGHT  = "#f5f0fa"
+UP_GRAY   = "#696763"
+
+PITCH_ABBREV = {
+    "fastball":  "FB",
+    "sinker":    "SI",
+    "cutter":    "CT",
+    "curveball": "CB",
+    "slider":    "SL",
+    "changeup":  "CH",
+    "splitter":  "SP",
+}
+
+PITCH_COLORS = {
+    "fastball":  "#D7191C",
+    "sinker":    "#FDAE61",
+    "cutter":    "#111111",
+    "curveball": "#1A9641",
+    "slider":    "#2C7BB6",
+    "changeup":  "#7B3294",
+    "splitter":  "#00BFC4",
+}
+
+RESULT_ABBREV = {
+    "swing & miss": "S&M",
+    "called strike": "CS",
+    "foul ball": "Foul",
+    "ball": "Ball",
+    "bip": "BIP",
+    "hbp": "HBP",
+    "int. walk": "IBB",
+}
+
+TEAM_NAME_MAP = {
+    "POR_PIL": "Pilots",
+}
+
+HIT_TYPE_MAP = {
+    "groundball": "Ground",
+    "flyball":    "Fly",
+    "linedrive":  "Line",
+    "popup":      "Pop",
+}
+
+SZ_LEFT  = -0.8333
+SZ_RIGHT =  0.8333
+SZ_BOT   =  1.5
+SZ_TOP   =  3.5
+CHASE_MARGIN = 2 / 12
+HEART_EDGE_INSET = 3 / 12
+EDGE_OUTER_MARGIN = 3.5 / 12
+EDGE_INNER_INSET = 3 / 12
+
+ALIASES = {
+    "hitter":          ["Batter", "Hitter"],
+    "batter_side":     ["BatterSide", "BatterStand", "Bats"],
+    "batter_team":     ["BatterTeam", "HitterTeam", "BatTeam"],
+
+    "pitcher":         ["Pitcher"],
+    "pitcher_throws":  ["PitcherThrows", "Throws"],
+
+    "inning":          ["Inning"],
+    "top_bottom":      ["Top/Bottom", "TopBottom", "InningHalf"],
+    "pa_inning":       ["PAofInning", "PlateAppearance", "PA"],
+    "pitch_no":        ["PitchNo", "PitchNumber", "PitchNoGame"],
+
+    "balls":           ["Balls", "BallsBeforePitch"],
+    "strikes":         ["Strikes", "StrikesBeforePitch"],
+    "outs":            ["Outs", "OutsBeforePitch"],
+
+    "pitch_call":      ["PitchCall"],
+    "play_result":     ["PlayResult"],
+    "korbb":           ["KorBB"],
+    "tagged_hit_type": ["TaggedHitType"],
+
+    "exit_speed":      ["ExitSpeed", "ExitVelocity"],
+    "launch_angle":    ["Angle", "LaunchAngle"],
+    "direction":       ["Direction", "Bearing"],
+    "distance":        ["Distance"],
+    "rel_speed":       ["RelSpeed", "PitchSpeed", "StartSpeed"],
+
+    "plate_x":         ["PlateLocSide"],
+    "plate_z":         ["PlateLocHeight"],
+
+    "man1":            ["ManOn1B", "RunnerOn1B", "On1B"],
+    "man2":            ["ManOn2B", "RunnerOn2B", "On2B"],
+    "man3":            ["ManOn3B", "RunnerOn3B", "On3B"],
+
+    "game_date":       ["Date", "GameDate", "UTCDate"],
+    "game_id":         ["GameID", "GameUID", "GamePk", "Game"],
+
+    "contact_x":       ["ContactPositionX", "ContactPosition X", "contactposition X", "contactpositionX"],
+    "contact_z":       ["ContactPositionZ", "ContactPosition Z", "contactposition Z", "contactpositionZ"],
+}
+
+# ── HELPERS ─────────────────────────────────────────────────────────────────
+def pick_first_existing(columns, candidates):
+    for c in candidates:
+        if c in columns:
+            return c
+    return None
+
+def build_colmap(df):
+    return {k: pick_first_existing(df.columns, v) for k, v in ALIASES.items()}
+
+def clean_str(v):
+    if pd.isna(v):
+        return ""
+    return str(v).strip()
+
+def safe_filename(s):
+    return re.sub(r'[\\/*?:"<>|]+', "_", str(s))
+
+def format_name(name):
+    name = clean_str(name)
+    if not name:
+        return "Unknown"
+    if "," in name:
+        last, first = [x.strip() for x in name.split(",", 1)]
+        return f"{first} {last}"
+    return name
+
+def format_handedness(val, hitter=False):
+    v = clean_str(val).upper()
+    if v.startswith("R"):
+        return "RHH" if hitter else "RHP"
+    if v.startswith("L"):
+        return "LHH" if hitter else "LHP"
+    if v.startswith("S"):
+        return "SHH" if hitter else "SHP"
+    return "?" + ("HH" if hitter else "HP")
+
+def get_color(pitch_type):
+    pt = clean_str(pitch_type).lower()
+    for key in PITCH_COLORS:
+        if key in pt:
+            return PITCH_COLORS[key]
+    return "#999999"
+
+def abbrev_pitch(pitch_type):
+    pt = clean_str(pitch_type).lower()
+    for key, abbr in PITCH_ABBREV.items():
+        if key in pt:
+            return abbr
+    if pt:
+        return pt[:2].upper()
+    return "??"
+
+def abbrev_result(result_str):
+    r = result_str.lower().strip()
+    for key, abbr in RESULT_ABBREV.items():
+        if r == key:
+            return abbr
+    if "swing" in r or "miss" in r:
+        return "S&M"
+    if "called" in r and "strike" in r:
+        return "CS"
+    if "foul" in r:
+        return "Foul"
+    if "ball" in r:
+        return "Ball"
+    return result_str
+
+def is_occupied(v):
+    if pd.isna(v):
+        return False
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    return s not in ("", "0", "false", "none", "nan")
+
+def fmt_num(v, dec=1):
+    if pd.isna(v):
+        return None
+    try:
+        return f"{float(v):.{dec}f}"
+    except:
+        return None
+
+def normalize_pitch_result(pitch_call):
+    pc = clean_str(pitch_call).lower()
+
+    if pc == "ballintentional":
+        return "Int. Walk"
+    if pc in ["ballcalled", "ballindirt", "ball in dirt"]:
+        return "Ball"
+    if pc == "strikecalled":
+        return "Called Strike"
+    if pc in ["foulball", "foulballnotfieldable", "foulballfieldable"]:
+        return "Foul Ball"
+    if pc == "inplay":
+        return "BIP"
+    if pc == "strikeswinging":
+        return "Swing & Miss"
+    if pc == "hitbypitch":
+        return "HBP"
+
+    if "foul" in pc:
+        return "Foul Ball"
+    if "swing" in pc:
+        return "Swing & Miss"
+    if "called" in pc and "strike" in pc:
+        return "Called Strike"
+    if "play" in pc:
+        return "BIP"
+    if "hit" in pc and "pitch" in pc:
+        return "HBP"
+    if "ball" in pc:
+        return "Ball"
+
+    return clean_str(pitch_call) if clean_str(pitch_call) else "Other"
+
+def get_hit_type_prefix(tagged_hit_type):
+    ht = clean_str(tagged_hit_type).lower().replace(" ", "").replace("_", "")
+    for key, val in HIT_TYPE_MAP.items():
+        if key in ht:
+            return val
+    return None
+
+def derive_header_date(df_in, cols):
+    if cols["game_date"] is None:
+        return datetime.today().strftime("%m/%d/%Y")
+
+    dt = pd.to_datetime(df_in[cols["game_date"]], errors="coerce").dropna()
+    if len(dt) == 0:
+        return datetime.today().strftime("%m/%d/%Y")
+
+    dmin = dt.min().date()
+    dmax = dt.max().date()
+
+    if dmin == dmax:
+        return pd.Timestamp(dmin).strftime("%m/%d/%Y")
+    return f"{pd.Timestamp(dmin).strftime('%m/%d/%Y')} - {pd.Timestamp(dmax).strftime('%m/%d/%Y')}"
+
+def build_game_key(df, cols):
+    parts = []
+    if cols["game_id"] and cols["game_id"] in df.columns:
+        parts.append(df[cols["game_id"]].astype(str))
+    if cols["game_date"] and cols["game_date"] in df.columns:
+        date_part = pd.to_datetime(df[cols["game_date"]], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+        parts.append(date_part)
+
+    if not parts:
+        return pd.Series(["GAME"] * len(df), index=df.index)
+
+    out = parts[0].copy()
+    for p in parts[1:]:
+        out = out.astype(str) + "|" + p.astype(str)
+    return out
+
+def sort_global_df(df, cols):
+    if cols["top_bottom"] and cols["top_bottom"] in df.columns:
+        df["_HALF_ORDER"] = df[cols["top_bottom"]].str.lower().str.startswith("top").map({True: 0, False: 1})
+
+    sort_cols = []
+    for c in [cols["game_date"], cols["game_id"], cols["inning"], "_HALF_ORDER",
+              cols["pa_inning"], cols["pitch_no"], "_ROW_ORDER"]:
+        if c and c in df.columns and c not in sort_cols:
+            sort_cols.append(c)
+    if "_ROW_ORDER" not in sort_cols:
+        sort_cols.append("_ROW_ORDER")
+    return df.sort_values(sort_cols, kind="mergesort").copy()
+
+def derive_pa_ids(df, cols):
+    df = df.copy()
+    df["_ROW_ORDER"] = np.arange(len(df))
+
+    if cols["pa_inning"] and cols["pa_inning"] in df.columns:
+        game_key = build_game_key(df, cols).astype(str)
+        inning = df[cols["inning"]].astype(str) if cols["inning"] else ""
+        half   = df[cols["top_bottom"]].astype(str) if cols["top_bottom"] else ""
+        batter = df[cols["hitter"]].astype(str) if cols["hitter"] else ""
+
+        df["_PA_ID"] = (
+            game_key.astype(str) + "|" +
+            half.astype(str) + "|" +
+            inning.astype(str) + "|" +
+            df[cols["pa_inning"]].astype(str) + "|" +
+            batter.astype(str)
+        )
+        return df
+
+    sdf = sort_global_df(df, cols)
+    game_key = build_game_key(sdf, cols)
+    batter = sdf[cols["hitter"]].astype(str) if cols["hitter"] else pd.Series([""] * len(sdf), index=sdf.index)
+    inning = sdf[cols["inning"]].astype(str) if cols["inning"] else pd.Series([""] * len(sdf), index=sdf.index)
+    half   = sdf[cols["top_bottom"]].astype(str) if cols["top_bottom"] else pd.Series([""] * len(sdf), index=sdf.index)
+
+    new_pa = (
+        game_key.ne(game_key.shift()) |
+        batter.ne(batter.shift()) |
+        inning.ne(inning.shift()) |
+        half.ne(half.shift())
+    )
+
+    sdf["_PA_NUM"] = new_pa.cumsum()
+    sdf["_PA_ID"] = "PA_" + sdf["_PA_NUM"].astype(str)
+
+    df = df.merge(sdf[["_ROW_ORDER", "_PA_ID"]], on="_ROW_ORDER", how="left")
+    return df
+
+def sort_pa_df(pa_df, cols):
+    sort_cols = []
+    for c in [cols["pitch_no"], "_ROW_ORDER"]:
+        if c and c in pa_df.columns and c not in sort_cols:
+            sort_cols.append(c)
+    if not sort_cols:
+        return pa_df.copy()
+    return pa_df.sort_values(sort_cols, kind="mergesort").copy()
+
+def build_ab_outcome(pa_df, cols):
+    if pa_df.empty:
+        return "N/A"
+
+    last = pa_df.iloc[-1]
+    pitch_call      = clean_str(last[cols["pitch_call"]])      if cols["pitch_call"]      else ""
+    play_result     = clean_str(last[cols["play_result"]])     if cols["play_result"]     else ""
+    korbb           = clean_str(last[cols["korbb"]])           if cols["korbb"]           else ""
+    tagged_hit_type = clean_str(last[cols["tagged_hit_type"]]) if cols["tagged_hit_type"] else ""
+
+    if normalize_pitch_result(pitch_call) == "HBP":
+        return "Hit By Pitch"
+
+    kl = korbb.lower()
+    if "walk" in kl or kl == "bb":
+        return "Walk"
+    if "strikeout" in kl or kl == "k":
+        return "Strikeout"
+
+    if normalize_pitch_result(pitch_call) == "BIP" or play_result:
+        pr = play_result if play_result else "Ball In Play"
+        pr_lower = pr.lower().strip()
+
+        hit_prefix = get_hit_type_prefix(tagged_hit_type)
+        if hit_prefix and ("out" in pr_lower):
+            pr = f"{hit_prefix} Out"
+        elif hit_prefix and pr_lower in ("", "undefined", "ball in play"):
+            pr = f"{hit_prefix} Ball"
+
+        ev_col = cols["exit_speed"]
+        ev = fmt_num(last[ev_col], 1) if ev_col and ev_col in last.index else None
+
+        if ev:
+            return f"{pr}\nEV: {ev}"
+        return pr
+
+    return normalize_pitch_result(pitch_call)
+
+def inning_label(row, cols):
+    inn  = clean_str(row[cols["inning"]])             if cols["inning"]     else "?"
+    half = clean_str(row[cols["top_bottom"]]).lower() if cols["top_bottom"] else ""
+
+    if half.startswith("top"):
+        half_txt = "Top"
+    elif half.startswith("bot"):
+        half_txt = "Bot"
+    else:
+        half_txt = ""
+
+    return f"{half_txt} {inn}".strip()
+
+def project_to_infield_edge(direction_deg):
+    """
+    Project a ground ball to the edge of the infield diamond.
+    Returns (x, y) at the intersection of the direction ray with the diamond boundary.
+    """
+    angle_rad = np.radians(90 - direction_deg)
+    dx = np.cos(angle_rad)
+    dy = np.sin(angle_rad)
+
+    base_dist = 90
+    home   = np.array([0.0, 0.0])
+    first  = np.array([base_dist,  base_dist])
+    second = np.array([0.0,        base_dist * 2])
+    third  = np.array([-base_dist, base_dist])
+
+    edges = [
+        (home,  first),
+        (first, second),
+        (second,third),
+        (third, home),
+    ]
+
+    best_t     = None
+    best_point = None
+
+    for (p1, p2) in edges:
+        ex = p2[0] - p1[0]
+        ey = p2[1] - p1[1]
+
+        denom = dx * ey - dy * ex
+        if abs(denom) < 1e-10:
+            continue
+
+        tx = p1[0] - home[0]
+        ty = p1[1] - home[1]
+
+        t = (tx * ey - ty * ex) / denom
+        s = (tx * dy - ty * dx) / denom
+
+        if t > 0.01 and 0.0 <= s <= 1.0:
+            if best_t is None or t < best_t:
+                best_t     = t
+                best_point = (home[0] + t * dx, home[1] + t * dy)
+
+    if best_point is None:
+        best_point = (dx * 60, dy * 60)
+
+    return best_point
+
+def get_bip_data(pa_df, cols):
+    last = pa_df.iloc[-1]
+    pitch_call  = clean_str(last[cols["pitch_call"]]) if cols["pitch_call"] else ""
+    play_result = clean_str(last[cols["play_result"]]) if cols["play_result"] else ""
+
+    is_bip = normalize_pitch_result(pitch_call) == "BIP" or bool(play_result)
+    if not is_bip:
+        return None
+
+    dir_col      = cols.get("direction")
+    dist_col     = cols.get("distance")
+    ev_col       = cols.get("exit_speed")
+    la_col       = cols.get("launch_angle")
+    hit_type_col = cols.get("tagged_hit_type")
+
+    direction       = float(last[dir_col])          if dir_col      and dir_col      in last.index and pd.notna(last[dir_col])      else None
+    distance        = float(last[dist_col])         if dist_col     and dist_col     in last.index and pd.notna(last[dist_col])     else None
+    ev              = float(last[ev_col])            if ev_col       and ev_col       in last.index and pd.notna(last[ev_col])       else None
+    la              = float(last[la_col])            if la_col       and la_col       in last.index and pd.notna(last[la_col])       else None
+    tagged_hit_type = clean_str(last[hit_type_col]) if hit_type_col and hit_type_col in last.index                                  else ""
+
+    return {
+        "direction":       direction,
+        "distance":        distance,
+        "ev":              ev,
+        "la":              la,
+        "play_result":     play_result,
+        "tagged_hit_type": tagged_hit_type,
+    }
+
+# ── DRAW HELPERS ─────────────────────────────────────────────────────────────
+def draw_strike_zone_ab(ax, pa_df):
+    ax.set_facecolor(UP_LIGHT)
+
+    zone = patches.Rectangle(
+        (SZ_LEFT, SZ_BOT),
+        SZ_RIGHT - SZ_LEFT,
+        SZ_TOP - SZ_BOT,
+        linewidth=1.2,
+        edgecolor=UP_PURPLE,
+        facecolor="none"
+    )
+    ax.add_patch(zone)
+
+    plate_x = [-0.8333, 0.8333, 0.8333, 0, -0.8333, -0.8333]
+    plate_y = [0.1, 0.1, 0.25, 0.5, 0.25, 0.1]
+    ax.plot(plate_x, plate_y, color=UP_PURPLE, lw=1.2)
+
+    valid_points = 0
+
+    for i, (_, row) in enumerate(pa_df.iterrows(), start=1):
+        px = row.get("PlateLocSide_num", np.nan)
+        pz = row.get("PlateLocHeight_num", np.nan)
+        pt = row.get("PitchType", "")
+        result = normalize_pitch_result(row.get("PitchCall", ""))
+        marker = "o" if result in ("Swing & Miss", "Foul Ball", "BIP") else "s"
+
+        if pd.notna(px) and pd.notna(pz):
+            valid_points += 1
+
+            ax.scatter(
+                px,
+                pz,
+                marker=marker,
+                s=160,
+                color=get_color(pt),
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3
+            )
+
+            ax.text(
+                px + 0.06,
+                pz + 0.06,
+                str(i),
+                fontsize=10,
+                fontweight="bold",
+                color=UP_PURPLE,
+                bbox=dict(
+                    facecolor="white",
+                    edgecolor="none",
+                    alpha=0.85,
+                    boxstyle="round,pad=0.12"
+                ),
+                zorder=4
+            )
+
+    ax.set_xlim(-2.4, 2.4)
+    ax.set_ylim(0, 5)
+    ax.set_box_aspect(1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(left=False, bottom=False)
+
+    if valid_points == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No Location Data",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            color=UP_PURPLE,
+            fontsize=13,
+            fontweight="bold"
+        )
+
+    for spine in ax.spines.values():
+        spine.set_edgecolor(UP_PURPLE)
+        spine.set_linewidth(1.2)
+
+def draw_at_bat_legends(fig, page_items):
+    pitch_types = set()
+    for item in page_items:
+        if item["type"] != "ab":
+            continue
+        pa_df = item["h_df"]
+        pa_df = pa_df[pa_df["_PA_ID"] == item["pa_id"]]
+        pitch_types.update(
+            clean_str(pitch_type) or "Unknown"
+            for pitch_type in pa_df["PitchType"]
+        )
+
+    pitch_types = sorted(pitch_types, key=str.casefold)
+    handles = [
+        Line2D(
+            [0], [0], marker="o", linestyle="none",
+            markerfacecolor=get_color(pitch_type), markeredgecolor="white",
+            markersize=8, label=pitch_type,
+        )
+        for pitch_type in pitch_types
+    ]
+    handles.extend([
+        Line2D(
+            [0], [0], marker="o", linestyle="none", color=UP_PURPLE,
+            markersize=8, label="Swing",
+        ),
+        Line2D(
+            [0], [0], marker="s", linestyle="none", color=UP_GRAY,
+            markersize=8, label="Taken",
+        ),
+    ])
+    fig.legend(
+        handles=handles,
+        labels=[handle.get_label() for handle in handles],
+        loc="upper center", bbox_to_anchor=(0.5, 0.78),
+        ncol=min(8, len(handles)), frameon=False, fontsize=9,
+        title="Pitch type / decision",
+    )
+
+def draw_summary_strike_zone(
+    ax, pitch_rows, title, total_count, decision_area=None, decision_score=None
+):
+    ax.set_facecolor(UP_LIGHT)
+    ax.add_patch(patches.Rectangle(
+        (SZ_LEFT, SZ_BOT), SZ_RIGHT - SZ_LEFT, SZ_TOP - SZ_BOT,
+        linewidth=2.2, edgecolor=UP_PURPLE, facecolor="none"
+    ))
+    if decision_area == "heart":
+        for x in (SZ_LEFT + HEART_EDGE_INSET, SZ_RIGHT - HEART_EDGE_INSET):
+            ax.plot(
+                [x, x], [SZ_BOT, SZ_TOP],
+                linewidth=1.2, linestyle="--", color=UP_GRAY, zorder=2
+            )
+    elif decision_area == "edge":
+        ax.add_patch(patches.Rectangle(
+            (SZ_LEFT + EDGE_INNER_INSET, SZ_BOT + EDGE_INNER_INSET),
+            SZ_RIGHT - SZ_LEFT - 2 * EDGE_INNER_INSET,
+            SZ_TOP - SZ_BOT - 2 * EDGE_INNER_INSET,
+            linewidth=1.2, linestyle="--", edgecolor=UP_GRAY, facecolor="none"
+        ))
+        ax.add_patch(patches.Rectangle(
+            (SZ_LEFT - EDGE_OUTER_MARGIN, SZ_BOT - EDGE_OUTER_MARGIN),
+            SZ_RIGHT - SZ_LEFT + 2 * EDGE_OUTER_MARGIN,
+            SZ_TOP - SZ_BOT + 2 * EDGE_OUTER_MARGIN,
+            linewidth=1.2, linestyle=":", edgecolor=UP_GRAY, facecolor="none"
+        ))
+    ax.plot(
+        [-0.8333, 0.8333, 0.8333, 0, -0.8333, -0.8333],
+        [0.1, 0.1, 0.25, 0.5, 0.25, 0.1],
+        color=UP_PURPLE, lw=2
+    )
+
+    if not pitch_rows.empty and decision_area:
+        pitch_rows = pitch_rows.copy()
+        pitch_rows["_PITCH_LABEL"] = pitch_rows["PitchType"].apply(
+            lambda value: clean_str(value) or "Unknown"
+        )
+        for decision, marker in [("Swing", "o"), ("Taken", "s")]:
+            decision_rows = pitch_rows[pitch_rows["_Decision"] == decision]
+            for pitch_type in sorted(decision_rows["_PITCH_LABEL"].unique()):
+                pitch_type_rows = decision_rows[
+                    decision_rows["_PITCH_LABEL"] == pitch_type
+                ]
+                ax.scatter(
+                    pitch_type_rows["PlateLocSide_num"],
+                    pitch_type_rows["PlateLocHeight_num"],
+                    s=85, marker=marker, color=get_color(pitch_type),
+                    edgecolors="white",
+                    linewidths=0.8, label=f"{pitch_type} {decision}", zorder=3
+                )
+    elif not pitch_rows.empty:
+        pitch_rows = pitch_rows.copy()
+        pitch_rows["_PITCH_LABEL"] = pitch_rows["PitchType"].apply(
+            lambda value: clean_str(value) or "Unknown"
+        )
+        for pitch_type in sorted(pitch_rows["_PITCH_LABEL"].unique()):
+            pitch_type_rows = pitch_rows[pitch_rows["_PITCH_LABEL"] == pitch_type]
+            ax.scatter(
+                pitch_type_rows["PlateLocSide_num"],
+                pitch_type_rows["PlateLocHeight_num"],
+                s=85, color=get_color(pitch_type), edgecolors="white",
+                linewidths=0.8, label=pitch_type, zorder=3
+            )
+    elif decision_area:
+        ax.text(
+            0.5, 0.5, "No Decisions",
+            transform=ax.transAxes, ha="center", va="center",
+            color=UP_PURPLE, fontsize=11, fontweight="bold"
+        )
+    else:
+        ax.text(
+            0.5, 0.5, "No Location Data",
+            transform=ax.transAxes, ha="center", va="center",
+            color=UP_PURPLE, fontsize=11, fontweight="bold"
+        )
+
+    if decision_area and decision_score is not None:
+        ax.set_title(
+            f"{title}\nScore: {decision_score:+d}",
+            color=UP_PURPLE, fontweight="bold", fontsize=10, pad=3
+        )
+    elif decision_area:
+        ax.set_title(
+            f"{title} ({len(pitch_rows)} decisions)",
+            color=UP_PURPLE, fontweight="bold", fontsize=10, pad=3
+        )
+    else:
+        ax.set_title(
+            f"{title} ({len(pitch_rows)} of {total_count} located)",
+            color=UP_PURPLE, fontweight="bold", fontsize=10, pad=3
+        )
+    ax.set_xlim(-2.4, 2.4)
+    ax.set_ylim(0, 5)
+    ax.set_box_aspect(1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(left=False, bottom=False)
+    for spine in ax.spines.values():
+        spine.set_edgecolor(UP_PURPLE)
+        spine.set_linewidth(1.2)
+
+def draw_hitter_summary_page(pdf, display_name, hitter_df, cols, page_num):
+    results = hitter_df["PitchCall"].map(normalize_pitch_result)
+    is_swing = results.isin(["Swing & Miss", "Foul Ball", "BIP"])
+    is_taken = results.isin(["Ball", "Called Strike", "Int. Walk", "HBP"])
+    is_whiff = results.eq("Swing & Miss")
+    is_bip = results.eq("BIP")
+
+    has_location = (
+        hitter_df["PlateLocSide_num"].notna()
+        & hitter_df["PlateLocHeight_num"].notna()
+    )
+    side_distance = (
+        (SZ_LEFT - hitter_df["PlateLocSide_num"]).clip(lower=0)
+        + (hitter_df["PlateLocSide_num"] - SZ_RIGHT).clip(lower=0)
+    )
+    height_distance = (
+        (SZ_BOT - hitter_df["PlateLocHeight_num"]).clip(lower=0)
+        + (hitter_df["PlateLocHeight_num"] - SZ_TOP).clip(lower=0)
+    )
+    in_zone = (
+        has_location
+        & hitter_df["PlateLocSide_num"].between(SZ_LEFT, SZ_RIGHT)
+        & hitter_df["PlateLocHeight_num"].between(SZ_BOT, SZ_TOP)
+    )
+    inside_chase_window = (
+        hitter_df["PlateLocSide_num"].between(
+            SZ_LEFT - CHASE_MARGIN, SZ_RIGHT + CHASE_MARGIN
+        )
+        & hitter_df["PlateLocHeight_num"].between(
+            SZ_BOT - CHASE_MARGIN, SZ_TOP + CHASE_MARGIN
+        )
+    )
+    chase_eligible = has_location & ~inside_chase_window
+    is_chase = is_swing & chase_eligible
+
+    ev_col = cols.get("exit_speed")
+    if ev_col and ev_col in hitter_df.columns:
+        batted_balls = is_bip & hitter_df[ev_col].notna()
+        hard_hit = batted_balls & hitter_df[ev_col].ge(95)
+    else:
+        batted_balls = pd.Series(False, index=hitter_df.index)
+        hard_hit = batted_balls
+
+    def format_rate(numerator, denominator):
+        if denominator == 0:
+            return "N/A", "0 / 0"
+        return f"{100 * numerator / denominator:.1f}%", f"{numerator} / {denominator}"
+
+    zone_rate = format_rate(int((is_swing & in_zone).sum()), int(in_zone.sum()))
+    hard_hit_rate = format_rate(int(hard_hit.sum()), int(batted_balls.sum()))
+    chase_rate = format_rate(int(is_chase.sum()), int(chase_eligible.sum()))
+    whiff_rate = format_rate(int(is_whiff.sum()), int(is_swing.sum()))
+
+    fig = plt.figure(figsize=(17, 15), facecolor="white")
+    draw_page_header(fig, display_name, page_num)
+    fig.text(
+        0.5, 0.89, "Pitch Location Summary",
+        ha="center", va="center", fontsize=18,
+        fontweight="bold", color=UP_PURPLE
+    )
+
+    categories = [
+        ("All Swings", is_swing),
+        ("Chase", is_chase),
+        ("Swing & Miss", is_whiff),
+        ("All Taken", is_taken),
+    ]
+    heart = (
+        in_zone
+        & hitter_df["PlateLocSide_num"].between(
+            SZ_LEFT + HEART_EDGE_INSET, SZ_RIGHT - HEART_EDGE_INSET
+        )
+    )
+    edge_outer = (
+        hitter_df["PlateLocSide_num"].between(
+            SZ_LEFT - EDGE_OUTER_MARGIN, SZ_RIGHT + EDGE_OUTER_MARGIN
+        )
+        & hitter_df["PlateLocHeight_num"].between(
+            SZ_BOT - EDGE_OUTER_MARGIN, SZ_TOP + EDGE_OUTER_MARGIN
+        )
+    )
+    edge_inner = (
+        hitter_df["PlateLocSide_num"].between(
+            SZ_LEFT + EDGE_INNER_INSET, SZ_RIGHT - EDGE_INNER_INSET
+        )
+        & hitter_df["PlateLocHeight_num"].between(
+            SZ_BOT + EDGE_INNER_INSET, SZ_TOP - EDGE_INNER_INSET
+        )
+    )
+    edge = has_location & edge_outer & ~edge_inner
+    swing_decision = pd.Series(np.where(is_swing, "Swing", "Taken"), index=hitter_df.index)
+    decision_known = is_swing | is_taken
+    heart_decision_score = int(is_swing.loc[heart & decision_known].sum()) - int(
+        is_taken.loc[heart & decision_known].sum()
+    )
+    strikes_col = cols.get("strikes")
+    if strikes_col and strikes_col in hitter_df.columns:
+        strikes_before_pitch = pd.to_numeric(hitter_df[strikes_col], errors="coerce")
+        edge_before_two_strikes = (
+            edge & decision_known & strikes_before_pitch.isin([0, 1])
+        )
+        edge_with_two_strikes = edge & decision_known & strikes_before_pitch.eq(2)
+    else:
+        edge_before_two_strikes = pd.Series(False, index=hitter_df.index)
+        edge_with_two_strikes = pd.Series(False, index=hitter_df.index)
+    edge_decision_score = int(is_taken.loc[edge_before_two_strikes].sum()) - int(
+        is_swing.loc[edge_before_two_strikes].sum()
+    )
+    decision_categories = [
+        ("Dick Shot Decisions", heart, heart_decision_score, "heart"),
+        (
+            "Edge Decisions Before 2 Strikes",
+            edge_before_two_strikes,
+            edge_decision_score,
+            "edge",
+        ),
+        (
+            "Edge Decisions At 2 Strikes",
+            edge_with_two_strikes,
+            None,
+            "edge",
+        ),
+    ]
+    axes = [
+        fig.add_axes([0.03, 0.50, 0.22, 0.28]),
+        fig.add_axes([0.27, 0.50, 0.22, 0.28]),
+        fig.add_axes([0.51, 0.50, 0.22, 0.28]),
+        fig.add_axes([0.75, 0.50, 0.22, 0.28]),
+        fig.add_axes([0.14, 0.14, 0.22, 0.28]),
+        fig.add_axes([0.39, 0.14, 0.22, 0.28]),
+        fig.add_axes([0.64, 0.14, 0.22, 0.28]),
+    ]
+    category_axes = (axes[0], axes[2], axes[3], axes[4])
+    for ax, (title, category_mask) in zip(category_axes, categories):
+        category_rows = hitter_df.loc[category_mask]
+        located_rows = category_rows.loc[has_location.loc[category_rows.index]]
+        draw_summary_strike_zone(
+            ax, located_rows, title, int(category_mask.sum())
+        )
+
+    decision_axes = (axes[1], axes[5], axes[6])
+    for ax, (title, area_mask, decision_score, decision_area) in zip(
+        decision_axes, decision_categories
+    ):
+        decision_mask = area_mask & decision_known
+        decision_rows = hitter_df.loc[decision_mask].copy()
+        decision_rows["_Decision"] = swing_decision.loc[decision_rows.index]
+        draw_summary_strike_zone(
+            ax, decision_rows, title, int(decision_mask.sum()),
+            decision_area=decision_area,
+            decision_score=decision_score
+        )
+
+    pitch_types = sorted(
+        {clean_str(pitch_type) or "Unknown" for pitch_type in hitter_df["PitchType"]},
+        key=str.casefold,
+    )
+    legend_handles = [
+        Line2D(
+            [0], [0], marker="o", linestyle="none",
+            markerfacecolor=get_color(pitch_type), markeredgecolor="white",
+            markersize=8, label=pitch_type,
+        )
+        for pitch_type in pitch_types
+    ]
+    legend_handles.extend([
+        Line2D(
+            [0], [0], marker="o", linestyle="none", color="#222222",
+            markersize=8, label="Swing",
+        ),
+        Line2D(
+            [0], [0], marker="s", linestyle="none", color="#222222",
+            markersize=8, label="Taken",
+        ),
+    ])
+    fig.legend(
+        handles=legend_handles,
+        labels=[handle.get_label() for handle in legend_handles],
+        loc="upper center", bbox_to_anchor=(0.5, 0.85),
+        ncol=min(8, len(legend_handles)), frameon=False, fontsize=9,
+        title="Pitch type / decision"
+    )
+
+    metric_text = (
+        f"Zone Swing: {zone_rate[0]} ({zone_rate[1]})   |   "
+        f"Hard-Hit (95+ mph): {hard_hit_rate[0]} ({hard_hit_rate[1]})   |   "
+        f"Chase: {chase_rate[0]} ({chase_rate[1]})   |   "
+        f"Whiff: {whiff_rate[0]} ({whiff_rate[1]})"
+    )
+    fig.text(
+        0.5, 0.045, metric_text,
+        ha="center", va="center", fontsize=13, color=UP_PURPLE
+    )
+    pdf.savefig(fig, facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+def draw_contact_point(ax, pa_df, cols):
+    """
+    Bird's-eye contact point chart.
+
+    Uses:
+      ContactPositionZ = left/right across plate, 0 = middle of plate
+      ContactPositionX = distance toward pitcher's mound from back point of plate
+
+    Home plate point is drawn at the bottom of the graph.
+    """
+    ax.set_facecolor(UP_LIGHT)
+
+    cx_col = cols.get("contact_x")
+    cz_col = cols.get("contact_z")
+
+    # Home plate dimensions in feet
+    # 17 inches wide = 1.4167 ft
+    plate_width = 17 / 12
+    half_plate = plate_width / 2
+
+    # Bird's-eye home plate.
+    # Back point of plate is at bottom: (0, 0)
+    # Front edge of plate is toward the mound, upward.
+    plate_depth = 17 / 12
+    side_depth  = 8.5 / 12
+
+    plate_x = [
+        -half_plate,
+         half_plate,
+         half_plate,
+         0,
+        -half_plate,
+        -half_plate,
+    ]
+
+    plate_y = [
+        plate_depth,
+        plate_depth,
+        side_depth,
+        0,
+        side_depth,
+        plate_depth,
+    ]
+
+    # Fill plate white so it looks like a true bird's-eye home plate
+    ax.fill(
+        plate_x,
+        plate_y,
+        facecolor="white",
+        edgecolor=UP_PURPLE,
+        linewidth=2.0,
+        zorder=1
+    )
+
+    # Subtle center line from back point toward mound
+    ax.plot(
+        [0, 0],
+        [0, 4.0],
+        color=UP_PURPLE,
+        lw=1.0,
+        alpha=0.35,
+        zorder=0
+    )
+
+    valid_points = 0
+
+    for i, (_, row) in enumerate(pa_df.iterrows(), start=1):
+        if not cx_col or not cz_col:
+            continue
+        if cx_col not in row.index or cz_col not in row.index:
+            continue
+
+        contact_x = row[cx_col]
+        contact_z = row[cz_col]
+
+        if pd.notna(contact_x) and pd.notna(contact_z):
+            valid_points += 1
+
+            pt = row.get("PitchType", "")
+            color = get_color(pt)
+
+            # Bird's-eye view:
+            # horizontal = inside/outside across plate
+            # vertical = distance toward mound from back point of plate
+            plot_x = float(contact_z)
+            plot_y = float(contact_x)
+
+            ax.scatter(
+                plot_x,
+                plot_y,
+                s=160,
+                color=color,
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3
+            )
+
+            ax.text(
+                plot_x + 0.05,
+                plot_y + 0.05,
+                str(i),
+                fontsize=10,
+                fontweight="bold",
+                color=UP_PURPLE,
+                bbox=dict(
+                    facecolor="white",
+                    edgecolor="none",
+                    alpha=0.85,
+                    boxstyle="round,pad=0.12"
+                ),
+                zorder=4
+            )
+
+    # Clean bird's-eye look: no title, no axes, no ticks
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+
+    # Point of home plate at bottom, toward mound goes up
+    ax.set_xlim(-2.3, 2.3)
+    ax.set_ylim(-0.25, 4.0)
+    ax.set_box_aspect(1)
+
+    if valid_points == 0:
+        ax.text(
+            0.5, 0.5,
+            "No Contact Data",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            color=UP_PURPLE,
+            fontsize=12,
+            fontweight="bold"
+        )
+
+    for spine in ax.spines.values():
+        spine.set_edgecolor(UP_PURPLE)
+        spine.set_linewidth(1.2)
+
+def draw_pitch_table(ax, pa_df, cols):
+    ax.axis("off")
+    ax.set_facecolor("white")
+
+    rel_speed_col = cols.get("rel_speed")
+
+    rows = []
+    for i, (_, row) in enumerate(pa_df.iterrows(), start=1):
+        pt     = row.get("PitchType", "")
+        abbr   = abbrev_pitch(pt)
+        result = abbrev_result(normalize_pitch_result(row.get("PitchCall", "")))
+
+        if rel_speed_col and rel_speed_col in row.index and pd.notna(row[rel_speed_col]):
+            velo = f"{float(row[rel_speed_col]):.1f}"
+        else:
+            velo = "-"
+
+        rows.append([str(i), abbr, velo, result])
+
+    col_labels = ["#", "Type", "Velo", "Result"]
+
+    row_colors = []
+    for r in range(len(rows)):
+        if r % 2 == 0:
+            row_colors.append([UP_LIGHT] * len(col_labels))
+        else:
+            row_colors.append(["#ffffff"] * len(col_labels))
+
+    tbl = ax.table(
+        cellText=rows,
+        colLabels=col_labels,
+        cellLoc="center",
+        colColours=[UP_PURPLE] * len(col_labels),
+        cellColours=row_colors,
+        bbox=[0, 0, 1, 1]
+    )
+    tbl.auto_set_font_size(False)
+
+    if len(rows) <= 5:
+        body_size, head_size = 15, 16
+    elif len(rows) <= 7:
+        body_size, head_size = 14, 15
+    else:
+        body_size, head_size = 13, 14
+
+    tbl.set_fontsize(body_size)
+
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor(UP_PURPLE)
+        cell.set_linewidth(1.0)
+        if r == 0:
+            cell.set_text_props(color="white", weight="bold", fontsize=head_size)
+        else:
+            cell.set_text_props(color=UP_PURPLE)
+
+def draw_info_box(ax, pa_df, cols, ab_number):
+    ax.set_facecolor(UP_LIGHT)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(left=False, bottom=False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    first = pa_df.iloc[0]
+
+    pitcher_col = cols["pitcher"]
+    throws_col  = cols["pitcher_throws"]
+    outs_col    = cols["outs"]
+
+    pitcher = format_name(first[pitcher_col]) if pitcher_col and pitcher_col in first.index else "N/A"
+    throws  = format_handedness(first[throws_col], hitter=False) if throws_col and throws_col in first.index else "N/A"
+    inning  = inning_label(first, cols)
+    outs    = clean_str(first[outs_col]) if outs_col and outs_col in first.index else "N/A"
+    outcome = build_ab_outcome(pa_df, cols)
+
+    fixed_lines = [
+        f"AB {ab_number}",
+        "",
+        f"Inning:  {inning}",
+        f"Outs:    {outs if outs else 'N/A'}",
+        f"Pitcher: {pitcher}",
+        f"Hand:    {throws}",
+        "",
+    ]
+
+    ax.text(
+        0.05, 0.97,
+        "\n".join(fixed_lines),
+        transform=ax.transAxes,
+        ha="left", va="top",
+        fontsize=12.5,
+        color=UP_PURPLE,
+        fontweight="bold",
+        clip_on=True,
+    )
+
+    ax.text(
+        0.05, 0.21,
+        outcome,
+        transform=ax.transAxes,
+        ha="left", va="top",
+        fontsize=11.5,
+        color=UP_PURPLE,
+        fontweight="bold",
+        clip_on=True,
+    )
+
+    for spine in ax.spines.values():
+        spine.set_edgecolor(UP_PURPLE)
+        spine.set_linewidth(1.2)
+
+def draw_spray_chart(ax, bip_data):
+    ax.set_facecolor("#1a6e2e")
+
+    foul_dist = 330
+    lf_angle  = np.radians(90 + 45)
+    rf_angle  = np.radians(90 - 45)
+
+    ax.plot([0, foul_dist * np.cos(lf_angle)],
+            [0, foul_dist * np.sin(lf_angle)],
+            color="white", lw=1.8, zorder=3)
+    ax.plot([0, foul_dist * np.cos(rf_angle)],
+            [0, foul_dist * np.sin(rf_angle)],
+            color="white", lw=1.8, zorder=3)
+
+    arc_angles = np.linspace(rf_angle, lf_angle, 300)
+    arc_dist = []
+    for a in arc_angles:
+        deg = np.degrees(a)
+        if deg <= 50 or deg >= 130:
+            arc_dist.append(330)
+        elif 85 <= deg <= 95:
+            arc_dist.append(400)
+        else:
+            arc_dist.append(330 + 70 * np.sin(np.radians((deg - 45) * 2)))
+    arc_x = [arc_dist[i] * np.cos(arc_angles[i]) for i in range(len(arc_angles))]
+    arc_y = [arc_dist[i] * np.sin(arc_angles[i]) for i in range(len(arc_angles))]
+    ax.plot(arc_x, arc_y, color="white", lw=2, zorder=3)
+
+    base_dist = 90
+    home   = np.array([0, 0])
+    first  = np.array([base_dist,  base_dist])
+    second = np.array([0,          base_dist * 2])
+    third  = np.array([-base_dist, base_dist])
+
+    infield_circle = plt.Circle(
+        (0, base_dist), 95,
+        color="#c8a870", fill=True, zorder=2
+    )
+    ax.add_patch(infield_circle)
+
+    diamond_path_verts = [
+        (home[0],   home[1]),
+        (first[0],  first[1]),
+        (second[0], second[1]),
+        (third[0],  third[1]),
+        (home[0],   home[1]),
+    ]
+    codes = [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY]
+    clip_path  = Path(diamond_path_verts, codes)
+    clip_patch = patches.PathPatch(clip_path, transform=ax.transData)
+    infield_circle.set_clip_path(clip_patch)
+
+    diamond_xs = [home[0], first[0], second[0], third[0], home[0]]
+    diamond_ys = [home[1], first[1], second[1], third[1], home[1]]
+    ax.plot(diamond_xs, diamond_ys, color="white", lw=1.8, zorder=4)
+
+    mound = plt.Circle((0, 60.5), 9, color="#c8a870", fill=True, zorder=3)
+    ax.add_patch(mound)
+
+    ax.scatter([0], [0], s=75, color="white", zorder=5)
+
+    if bip_data is not None and bip_data["direction"] is not None:
+        direction_deg   = bip_data["direction"]
+        distance        = bip_data["distance"]
+        tagged_hit_type = bip_data.get("tagged_hit_type", "")
+        is_groundball = "groundball" in tagged_hit_type.lower().replace(" ", "").replace("_", "")
+
+        if is_groundball:
+            hit_x, hit_y = project_to_infield_edge(direction_deg)
+        elif distance is not None:
+            plot_angle_rad = np.radians(90 - direction_deg)
+            hit_x = distance * np.cos(plot_angle_rad)
+            hit_y = distance * np.sin(plot_angle_rad)
+        else:
+            plot_angle_rad = np.radians(90 - direction_deg)
+            hit_x = 150 * np.cos(plot_angle_rad)
+            hit_y = 150 * np.sin(plot_angle_rad)
+
+        ax.scatter(hit_x, hit_y, s=240, color="black",
+                   edgecolors="white", linewidths=1.0, zorder=6)
+
+    ax.set_xlim(-350, 350)
+    ax.set_ylim(-20, 430)
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_edgecolor(UP_PURPLE)
+        spine.set_linewidth(1.2)
+
+# ── PAGE HEADER ──────────────────────────────────────────────────────────────
+def draw_page_header(fig, batter_name, page_num):
+    header_bar = patches.Rectangle(
+        (0, 0.93), 1, 0.07,
+        transform=fig.transFigure,
+        color=UP_PURPLE, zorder=0
+    )
+    fig.add_artist(header_bar)
+
+    # Team name top left
+    fig.text(0.012, 0.962, "Pilots",
+             ha="left", va="center",
+             fontsize=16, fontweight="bold", color="white")
+
+    # Batter name center — large
+    fig.text(0.5, 0.962, batter_name,
+             ha="center", va="center",
+             fontsize=26, fontweight="bold", color="white")
+
+    # Page number top right
+    fig.text(0.98, 0.962, f"Page {page_num}",
+             ha="right", va="center",
+             fontsize=10.5, color="white")
+
+# ── HITTER SECTION DIVIDER ────────────────────────────────────────────────────
+def draw_hitter_section_header(fig, gs, row_idx, display_name, hitter_side, date_text):
+    ax = fig.add_subplot(gs[row_idx, :])
+    ax.set_facecolor(UP_PURPLE)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    # Date centered
+    ax.text(
+        0.5, 0.5,
+        date_text,
+        transform=ax.transAxes,
+        ha="center", va="center",
+        fontsize=13, fontweight="bold",
+        color="white"
+    )
+
+# ── LOAD DATA ────────────────────────────────────────────────────────────────
+df = pd.read_csv(CSV_PATH)
+df.columns = df.columns.str.strip()
+
+cols = build_colmap(df)
+
+if cols["batter_team"]:
+    df[cols["batter_team"]] = df[cols["batter_team"]].replace(TEAM_NAME_MAP)
+
+if cols["hitter"] is None:
+    raise ValueError("Could not find hitter column. Expected one of: Batter, Hitter")
+
+# ── FILTER OUT EMPTY BATTER ROWS ─────────────────────────────────────────────
+# Works whether we have one team or both teams in the data
+df = df[df[cols["hitter"]].notna()]
+df = df[df[cols["hitter"]].astype(str).str.strip() != ""]
+df = df.reset_index(drop=True)
+
+# Standard PitchType column
+if "TaggedPitchType" in df.columns and "AutoPitchType" in df.columns:
+    df["PitchType"] = df["TaggedPitchType"].fillna(df["AutoPitchType"])
+elif "TaggedPitchType" in df.columns:
+    df["PitchType"] = df["TaggedPitchType"]
+elif "AutoPitchType" in df.columns:
+    df["PitchType"] = df["AutoPitchType"]
+elif "PitchType" not in df.columns:
+    df["PitchType"] = "Unknown"
+
+# Standard alias columns
+df["PitchCall"]  = df[cols["pitch_call"]]  if cols["pitch_call"]  else ""
+df["PlayResult"] = df[cols["play_result"]] if cols["play_result"] else ""
+df["KorBB"]      = df[cols["korbb"]]       if cols["korbb"]       else ""
+
+# Numeric columns
+if cols["plate_x"]:
+    df["PlateLocSide_num"]   = pd.to_numeric(df[cols["plate_x"]], errors="coerce")
+else:
+    df["PlateLocSide_num"]   = np.nan
+
+if cols["plate_z"]:
+    df["PlateLocHeight_num"] = pd.to_numeric(df[cols["plate_z"]], errors="coerce")
+else:
+    df["PlateLocHeight_num"] = np.nan
+
+for col_key in ["exit_speed", "launch_angle", "direction", "distance",
+                "rel_speed", "inning", "pa_inning", "pitch_no", "balls",
+                "strikes", "outs",
+                "contact_x", "contact_z"]:
+    if cols[col_key]:
+        df[cols[col_key]] = pd.to_numeric(df[cols[col_key]], errors="coerce")
+
+# Derive PA IDs and sort
+df = derive_pa_ids(df, cols)
+df = sort_global_df(df, cols)
+
+# ── TEAM GROUPING ─────────────────────────────────────────────────────────────
+team_col = cols.get("batter_team")
+
+if team_col and team_col in df.columns:
+    unique_teams = df[team_col].dropna().astype(str).unique().tolist()
+    if len(unique_teams) >= 2:
+        # Let the user choose mode: separate per-team, combined, or pick specific teams
+        numbered = "\n".join([f"{i+1}: {t}" for i, t in enumerate(unique_teams)])
+        prompt_text = (
+            f"Found teams:\n{numbered}\n\n"
+            "Options:\n"
+            "  s  = separate per-team PDFs (one file per team)\n"
+            "  c  = combined report for All Hitters\n"
+            "  or enter comma-separated team numbers or names to generate only those teams.\n"
+            "Examples: 's', 'c', '1', '2,3', 'Team Name'\n"
+            "Default: 's'\n"
+        )
+
+        try:
+            import tkinter as tk
+            from tkinter import simpledialog
+
+            root = tk.Tk()
+            root.withdraw()
+            choice = simpledialog.askstring("Team Mode", prompt_text)
+            root.destroy()
+        except Exception:
+            choice = input(prompt_text + "Choice: ").strip()
+
+        if not choice:
+            choice = "s"
+
+        choice_str = str(choice).strip()
+
+        if choice_str.lower().startswith("c"):
+            df["_TEAM"] = "All Hitters"
+            team_col = "_TEAM"
+            teams = ["All Hitters"]
+        elif choice_str.lower().startswith("s"):
+            teams = unique_teams
+        else:
+            # Try parse numeric indices
+            picked = []
+            parts = [p.strip() for p in choice_str.split(",") if p.strip()]
+            for p in parts:
+                if p.isdigit():
+                    idx = int(p) - 1
+                    if 0 <= idx < len(unique_teams):
+                        picked.append(unique_teams[idx])
+                else:
+                    # try match by name (case-insensitive)
+                    for t in unique_teams:
+                        if t.lower() == p.lower():
+                            picked.append(t)
+                            break
+
+            teams = picked if picked else unique_teams
+    else:
+        teams = unique_teams
+else:
+    df["_TEAM"] = "All Hitters"
+    team_col = "_TEAM"
+    teams = ["All Hitters"]
+
+today_file  = datetime.today().strftime("%Y-%m-%d")
+csv_basename = os.path.splitext(os.path.basename(CSV_PATH))[0]
+header_date = derive_header_date(df, cols)
+
+# ── BUILD ONE PDF PER TEAM ────────────────────────────────────────────────────
+for team_name in sorted(teams):
+    team_df = df[df[team_col].astype(str) == team_name].copy()
+    if team_df.empty:
+        continue
+
+    hitter_order = team_df[cols["hitter"]].astype(str).drop_duplicates().tolist()
+
+    hitter_blocks = []
+    for hitter_raw in hitter_order:
+        h_df = team_df[team_df[cols["hitter"]].astype(str) == hitter_raw].copy()
+        if h_df.empty:
+            continue
+
+        pa_ids = h_df["_PA_ID"].dropna().drop_duplicates().tolist()
+        if not pa_ids:
+            continue
+
+        display_name = format_name(hitter_raw)
+
+        if cols["batter_side"] and cols["batter_side"] in h_df.columns:
+            first_side = h_df[cols["batter_side"]].dropna()
+            hitter_side = format_handedness(first_side.iloc[0], hitter=True) if len(first_side) else "?HH"
+        else:
+            hitter_side = "?HH"
+
+        hitter_blocks.append({
+            "hitter_raw":   hitter_raw,
+            "display_name": display_name,
+            "hitter_side":  hitter_side,
+            "pa_ids":       pa_ids,
+            "h_df":         h_df,
+        })
+
+    if not hitter_blocks:
+        print(f"⚠️  Skipped team {team_name}: no at-bats found")
+        continue
+
+    # ── Build pages — each hitter gets their own page(s) ────────────────────
+    # Each hitter block becomes its own set of pages
+    # Never mix two hitters on the same page
+
+    safe_team = safe_filename(team_name.replace(" ", "_"))
+    # Filename uses team name and current date (YYYY-MM-DD)
+    out_path  = os.path.join(OUTPUT_DIR, f"{safe_team}_{today_file}_hitter_report.pdf")
+
+    with PdfPages(out_path) as pdf:
+        for block in hitter_blocks:
+            hitter_raw   = block["hitter_raw"]
+            display_name = block["display_name"]
+            hitter_side  = block["hitter_side"]
+            pa_ids       = block["pa_ids"]
+            h_df         = block["h_df"]
+
+            # Split this hitter's PA ids into chunks of ABS_PER_PAGE
+            pa_chunks = [
+                pa_ids[i:i + ABS_PER_PAGE]
+                for i in range(0, len(pa_ids), ABS_PER_PAGE)
+            ]
+
+            for chunk_idx, chunk in enumerate(pa_chunks):
+                page_num = chunk_idx + 1
+
+                # Build page items — header row + AB rows
+                page_items = []
+
+                # Always add section header on first page of hitter
+                # On subsequent pages just show their name in header bar
+                page_items.append({
+                    "type":         "header",
+                    "display_name": display_name,
+                    "hitter_side":  hitter_side,
+                })
+                page_items.append({"type": "legend"})
+
+                ab_num_offset = chunk_idx * ABS_PER_PAGE
+                for ab_idx, pa_id in enumerate(chunk):
+                    page_items.append({
+                        "type":         "ab",
+                        "pa_id":        pa_id,
+                        "display_name": display_name,
+                        "hitter_side":  hitter_side,
+                        "ab_num":       ab_num_offset + ab_idx + 1,
+                        "h_df":         h_df,
+                    })
+
+                n_abs = sum(1 for it in page_items if it["type"] == "ab")
+                if n_abs == 0:
+                    continue
+
+                HEADER_WEIGHT = 0.18
+                row_heights = []
+                for it in page_items:
+                    if it["type"] == "header":
+                        row_heights.append(HEADER_WEIGHT)
+                    elif it["type"] == "legend":
+                        row_heights.append(0.65)
+                    else:
+                        row_heights.append(1.0)
+
+                fig = plt.figure(figsize=(17, 14.5), facecolor="white")
+
+                # Always show hitter name in page header
+                draw_page_header(fig, display_name, page_num)
+                draw_at_bat_legends(fig, page_items)
+
+                gs = gridspec.GridSpec(
+    len(page_items), 5,
+    figure=fig,
+    width_ratios=[1.05, 1.05, 1.15, 0.85, 1.05],
+    height_ratios=row_heights,
+    left=0.01,
+    right=0.99,
+    top=0.90,
+    bottom=0.04,
+    wspace=0.07,
+    hspace=0.16
+)
+
+                for row_idx, item in enumerate(page_items):
+
+                    if item["type"] == "header":
+                        draw_hitter_section_header(
+                            fig, gs, row_idx,
+                            item["display_name"],
+                            item["hitter_side"],
+                            header_date
+                        )
+                        continue
+
+                    if item["type"] == "legend":
+                        continue
+
+                    pa_id  = item["pa_id"]
+                    ab_num = item["ab_num"]
+
+                    pa_df = h_df[h_df["_PA_ID"] == pa_id].copy()
+                    if pa_df.empty:
+                        continue
+
+                    pa_df = sort_pa_df(pa_df, cols)
+
+                    ax_zone    = fig.add_subplot(gs[row_idx, 0])
+                    ax_contact = fig.add_subplot(gs[row_idx, 1])
+                    ax_tbl     = fig.add_subplot(gs[row_idx, 2])
+                    ax_info    = fig.add_subplot(gs[row_idx, 3])
+                    ax_spray   = fig.add_subplot(gs[row_idx, 4])
+
+                    draw_strike_zone_ab(ax_zone, pa_df)
+                    draw_contact_point(ax_contact, pa_df, cols)
+                    draw_pitch_table(ax_tbl, pa_df, cols)
+                    draw_info_box(ax_info, pa_df, cols, ab_num)
+
+                    bip_data = get_bip_data(pa_df, cols)
+                    draw_spray_chart(ax_spray, bip_data)
+
+                pdf.savefig(fig, facecolor=fig.get_facecolor())
+                plt.close(fig)
+
+            draw_hitter_summary_page(
+                pdf, display_name, h_df, cols, len(pa_chunks) + 1
+            )
+
+        print(f"✅  Saved: {out_path}")
+
+print(f"\n🎉  Done! {len(teams)} team PDF(s) saved to '{OUTPUT_DIR}/'")
